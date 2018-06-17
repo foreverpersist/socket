@@ -259,6 +259,8 @@ static void cmd_private(server s, int fd, char *buff, char *msg, char *name)
 	{
 		sprintf(buff, "<P>[%d %s] %s\n", fd, c->name, msg);
 		send_msg(cfd, buff);
+		sprintf(buff, "<SERVER> PRIVATE\n");
+		send_msg(fd, buff);
 	}
 	else
 	{
@@ -277,6 +279,8 @@ static void cmd_public(server s, int fd, char *buff, char *msg)
 	hashmap_get(client, s->client_map, fd, &c);
 	sprintf(buff, "[%d %s] %s\n", fd, c->name, msg);
 	send_others(s, buff, fd);
+	sprintf(buff, "<SERVER> PUBLIC\n");
+	send_msg(fd, buff);
 }
 
 static int handle_message(server s, int fd, char *msg, int len)
@@ -349,38 +353,6 @@ static int start_server(int port)
 	struct epoll_event event;
 	struct epoll_event events[EPOLL_MAXEVENTS];
 
-	struct sockaddr_in bind_addr;
-
-	// if ((serverfd = socket(PF_INET, SOCK_STREAM, 0) < 0))
-	// {
-	// 	perror("socket");
-	// 	return -1;
-	// }
-
-
-	// res = 1;
-	// if (setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &res, sizeof(res)) < 0)
-	// {
-	// 	perror("setsockopt");
-	// 	return -2;
-	// }
-	
-	// memset(&bind_addr, 0, sizeof(bind_addr));
-	// bind_addr.sin_family = AF_INET;
-	// bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	// bind_addr.sin_port = htons(port);
-	// if (bind(serverfd, (struct sockaddr *) &bind_addr, sizeof(bind_addr)) < 0)
-	// {
-	// 	perror("bind");
-	// 	return -1;
-	// }
-	// if (listen(serverfd, 10) < 0)
-	// {
-	// 	perror("listen");
-	// 	return -1;
-	// }
-
-
 	memset(&s, 0, sizeof(s));
 	s.client_map = hashmap_create(client, 0, 0);
 	hashmap_set_hash_func(client, s.client_map, int_hash);
@@ -394,13 +366,6 @@ static int start_server(int port)
 		perror("sock_server");
 		return -1;	
 	}
-
-	// res = 1;
-	// if (setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &res, sizeof(res)) < 0)
-	// {
-	// 	perror("setsockopt");
-	// 	return -2;
-	// }
 
 	if ((epfd = epoll_create(1)) < 0)
 	{
@@ -465,12 +430,6 @@ static int start_server(int port)
 					|| (handle_message(&s, sessionfd, buff, len) < 0))
 				{
 					close(sessionfd);
-					// event = events[i];
-					// if (epoll_ctl(epfd, EPOLL_CTL_DEL, sessionfd, &event))
-					// {
-					// 	perror("epoll_ctl");
-					// 	return -4;
-					// }
 				}
 			}
 		}
@@ -608,6 +567,22 @@ static void show_user(int id, char *name)
 static void show_users_end()
 {
 	printf("================================\n\n");
+}
+
+/* Client sends private message
+ * */
+static void show_private()
+{
+        show_time();
+        printf(GREEN "PRIVATE MESSAGE HAS BEEN SENT\n\n" NONE);
+}
+
+/* Client sends public message
+ * */
+static void show_public()
+{
+        show_time();
+        printf(GREEN "MESSAGE HAS BEEN SENT\n\n" NONE);
 }
 
 /* Client gets help message
@@ -766,6 +741,14 @@ static void *client_worker(void *arg)
 				param += 5;
 				show_help(param);
 			}
+			else if (!strcmp(param, "PRIVATE"))
+                        {
+                                show_private();
+                        }
+                        else if (!strcmp(param, "PUBLIC"))
+                        {
+                                show_public();
+                        }
 			else
 			{
 				/* Unkown type */
