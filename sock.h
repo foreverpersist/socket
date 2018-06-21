@@ -22,7 +22,7 @@
    Create a server
    If port is valid, create an INET server.
    Otherwise, create an UNIX server.
-   Return serverfd for OK, negetive value for ERR
+   Return serverfd for OK, negative value for ERR
    Example:
        [INET Server]
        int serverfd;
@@ -41,7 +41,7 @@ int sock_server(int port, const char *sockfile, int queue_length);
 
 /*
    Accept a client and create a session
-   Return sessionfd for OK, negetive value for ERR
+   Return sessionfd for OK, negative value for ERR
    Example:
        int sessionfd;
        if ((sessionfd = sock_accept(serverfd, addr, addrlen)) < 0)
@@ -55,7 +55,7 @@ int sock_accept(int serverfd, struct sockaddr *addr, socklen_t *addrlen);
    Create a client connected to a server
    If host and port are valid, create an INET client.
    Otherwise, create an UNIX client.
-   Return clientfd for OK, negetive value for ERR
+   Return clientfd for OK, negative value for ERR
    Example:
        [INET Client]
        int clientfd;
@@ -84,7 +84,7 @@ void sock_close(int fd);
 
 /*
    Send message
-   Return message length sent for OK, negetive value for ERR
+   Return message length sent for OK, negative value for ERR
    Example:
        if ((sock_send(clientfd, msg, msg_len) < 0)
        {
@@ -95,7 +95,7 @@ ssize_t sock_send(int sockfd, const void *buf, size_t len);
 
 /*
    Receive message
-   Return message length received for OK, negetive value for ERR
+   Return message length received for OK, negative value for ERR
    Example:
        if ((msg_len = sock_recv(sessionfd, buf, MAX_LEN) < 0)
        {
