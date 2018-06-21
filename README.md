@@ -91,8 +91,9 @@ $ ./chatroom -c [-i IP] [-p PORT]
 
 	Some client commands is supported when sending message.
 
+
 |         COMMAND           |     DESCRIPTION      |
-|         -:----:           |     -:--------:      |
+| ------------------------- | -------------------- |
 | :quit                     | Quit                 |
 | :q                        |                      |
 | :info                     | Get client info      |
