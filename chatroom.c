@@ -237,8 +237,9 @@ static void cmd_help(int fd, char *buff)
 	strcat(buff, ":rename [name]             \tchange client name\n");
 	strcat(buff, ":users                     \tshow all users' info\n");
 	strcat(buff, ":help                      \tshow help\n");
-	strcat(buff, ":private [id|name] [msg]  \tsend private message\n");
+	strcat(buff, ":private [id|name] [msg]   \tsend private message\n");
 	strcat(buff, "[msg]                      \tsend public message\n");
+	strcat(buff, ":file [id|name] [file]     \tsend private file\n");
 	send_msg(fd, buff);
 }
 
@@ -283,11 +284,39 @@ static void cmd_public(server s, int fd, char *buff, char *msg)
 	send_msg(fd, buff);
 }
 
+/* Client sends private file
+   Send message to specific client:
+       <F>[id name] ...
+ */
+static void cmd_file(server s, int fd, char *buff, char *msg, char *name)
+{
+	client c;
+	int cfd = -1;
+	int header_len;
+	hashmap_get(client, s->client_map, fd, &c);
+	if ((cfd = atoi(name)) <= 0)
+	{
+		hashmap_get(name, s->name_map, name, &cfd);
+	}
+	if (hashmap_has_key(client, s->client_map, cfd) == 0 && cfd != fd)
+	{
+		header_len = sprintf(buff, "<F>[%d %s] ", fd, c->name);
+		memcpy(buff + header_len, msg, BUFF_SIZE - header_len);
+		sock_send(cfd, buff, BUFF_SIZE);
+	}
+	else
+	{
+		sprintf(buff, "<SERVER> ERROR PRIVATE USER IS INVALID\n");
+		send_msg(fd, buff);
+	}
+}
+
 static int handle_message(server s, int fd, char *msg, int len)
 {
 	char *cmd;
 	char *param;
 	char *name;
+	char *real_msg;
 	int cfd;
 	client c;
 	char buff[BUFF_SIZE];
@@ -325,8 +354,14 @@ static int handle_message(server s, int fd, char *msg, int len)
 	else if (!strcmp(cmd, ":private") || !strcmp(cmd, ":p"))
 	{
 		param = strtok(NULL, " \n");
-		msg = param + strlen(param) + 1;
-		cmd_private(s, fd, buff, msg, param);
+		real_msg = param + strlen(param) + 1;
+		cmd_private(s, fd, buff, real_msg, param);
+	}
+	else if (!strcmp(cmd, ":file") || !strcmp(cmd, ":f"))
+	{
+		param = strtok(NULL, " \n");
+		real_msg = param + strlen(param) + 1;
+		cmd_file(s, fd, buff, real_msg, param);
 	}
 	else
 	{
@@ -476,6 +511,7 @@ typedef struct
 	int id;
 	char name[32];
 	char addr[32];
+	char dir[512];
 	volatile bool alive;
 } conn_t, *conn;
 
@@ -570,19 +606,19 @@ static void show_users_end()
 }
 
 /* Client sends private message
- * */
+ */
 static void show_private()
 {
-        show_time();
-        printf(GREEN "PRIVATE MESSAGE HAS BEEN SENT\n\n" NONE);
+	show_time();
+	printf(GREEN "PRIVATE MESSAGE HAS BEEN SENT\n\n" NONE);
 }
 
 /* Client sends public message
- * */
+ */
 static void show_public()
 {
-        show_time();
-        printf(GREEN "MESSAGE HAS BEEN SENT\n\n" NONE);
+	show_time();
+	printf(GREEN "MESSAGE HAS BEEN SENT\n\n" NONE);
 }
 
 /* Client gets help message
@@ -618,6 +654,82 @@ static void show_msg_public(int id, char *name, char *msg)
 	show_time();
 	printf(CYAN "[%d][%s]: \n" NONE, id, name);
 	printf("%s\n", msg);
+}
+
+/* Client gets file messge from one user
+   msg format: type length value
+       type: [n]ame, [b]egin, [m]ore, [e]nd, o[k]
+ */
+static void show_msg_file(int id, char *name, char *msg, int msg_len, conn c)
+{
+	static char *filename = NULL;
+	static FILE *fp = NULL;
+	char *filepath;
+
+	char *param;
+	char *type;
+	int len;
+	char *value;
+	char buff[128];
+
+	type = strtok(msg, " ");
+	param = strtok(NULL, " ");
+	len = atoi(param);
+	value = param + strlen(param) + 1;
+	if (!strcmp(type, "name") || !strcmp(type, "n"))
+	{
+		value[len] = 0;
+		filename = strdup(value);
+		// Show filename
+		show_time();
+		printf(BLUE "<F>[%d %s]: \n" NONE, id, name);
+		printf(L_BLUE "File <%s>\n\n" NONE, filename);
+	}
+	else if (!strcmp(type, "begin") || !strcmp(type, "b"))
+	{
+		filepath = malloc(sizeof(char) * (strlen(c->dir) + 3 + strlen(filename)));
+		sprintf(filepath, "%s/%s", c->dir, filename);
+		if ((fp = fopen(filepath, "w")) != NULL)
+			fwrite(value, sizeof(char), len, fp);
+		free(filepath);
+	}
+	else if (!strcmp(type, "more") || !strcmp(type, "m"))
+	{
+		if (fp)
+			fwrite(value, sizeof(char), len, fp);
+	}
+	else if (!strcmp(type, "end") || !strcmp(type, "e"))
+	{
+		if (fp)
+		{
+			// fwrite(value, sizeof(char), len, fp);
+			fclose(fp);
+			fp = NULL;
+			sprintf(buff, ":f %d o %4d %s", id, (int) strlen(filename), filename);
+			sock_send(c->fd, buff, BUFF_SIZE);
+			// Show file saved
+			show_time();
+			printf(L_BLUE "File <%s> has been saved at <%s>\n" NONE, filename, c->dir);
+		}
+		if (filename)
+		{
+			free(filename);
+			filename = NULL;
+		}
+	}
+	else if (!strcmp(type, "ok") || !strcmp(type, "o"))
+	{
+		value[len] = 0;
+		printf(GREEN "FILE <%s> HAS BEEN SENT\n\n", value);
+	}
+	else
+	{
+		// Unknown type
+		type[strlen(type)] = ' ';
+		param[strlen(param)] = ' ';
+		printf(YELLOW "<F>[%d %s][UNKNOWN]: \n" NONE, id, name);
+		printf("%s\n", msg);
+	}
 }
 
 /* Client gets message from unknown user
@@ -776,6 +888,16 @@ static void *client_worker(void *arg)
 			param += strlen(param) + 1;
 			show_msg_public(id, name, param);
 		}
+		else if(!strncmp(who, "<F>[", 4))
+		{
+			/* File message come from client */
+			sscanf(who, "<F>[%d", &id);
+			param = strtok(NULL, " ");
+			strcpy(name, param);
+			name[strlen(name)-1] = 0;
+			param += strlen(param) + 1;
+			show_msg_file(id, name, param, len - (buff - param), c);
+		}
 		else
 		{
 			/* Message comes from unknown source */
@@ -788,13 +910,20 @@ static void *client_worker(void *arg)
 	return NULL;
 }
 
-static int start_client(char *ip, int port)
+static int start_client(char *ip, int port, char *dir)
 {
 	conn_t c;
 	int clientfd;
 	char buff[BUFF_SIZE];
 	int len;
 	pthread_t tid;
+	char cmd[64];
+	char name[64];
+	char filepath[1024];
+	char *filename;
+	FILE *fp;
+	int header_len;
+	int buff_size;
 
 	memset(&c, 0, sizeof(c));
 
@@ -806,6 +935,7 @@ static int start_client(char *ip, int port)
 
 	c.fd = clientfd;
 	c.alive = true;
+	strcpy(c.dir, dir);
 	/* Receive messages from server */
 	pthread_create(&tid, NULL, client_worker, (void *) &c);
 
@@ -816,7 +946,51 @@ static int start_client(char *ip, int port)
 		len = strlen(buff);
 		buff[len] = 0;
 
-		if (len = sock_send(clientfd, buff, len) < 0)
+		if (!strncmp(buff, ":file ", 6) || !strncmp(buff, ":f ", 3))
+		{
+			// Send file
+			sscanf(buff, "%s %s %s", cmd, name, filepath);
+			if ((fp = fopen(filepath, "r")) != NULL )
+			{
+				if ( (filename = strrchr(filepath, '/')) != NULL)
+					filename += 1;
+				else
+					filename = filepath;
+				header_len = (int) sprintf(buff, ":f %s n %4d ", name, (int) strlen(filename));
+				buff_size = BUFF_SIZE - header_len - 64;
+				// Send type name
+				len = sprintf(buff + header_len, "%s", filename);
+				if ((len = sock_send(clientfd, buff, BUFF_SIZE)) < 0)
+					break;
+				// Send type begin
+				len = fread(buff+header_len, sizeof(char), buff_size, fp);
+				sprintf(buff + header_len - 7, "b %4d", len);
+				buff[header_len - 1] = ' ';
+				if ((len = sock_send(clientfd, buff, BUFF_SIZE)) < 0)
+					break;
+				while ((len = fread(buff+header_len, sizeof(char), buff_size, fp)) > 0)
+				{
+					// Send type more
+					sprintf(buff + header_len - 7, "m %4d", len);
+					buff[header_len - 1] = ' ';
+					if ((len = sock_send(clientfd, buff, BUFF_SIZE)) < 0)
+					{
+						break;
+					}
+				}
+				// Send type end
+				sprintf(buff + header_len - 7, "e    0 \n");
+				if (len < 0 || ((len = sock_send(clientfd, buff, BUFF_SIZE)) < 0))
+					break;
+			}
+			else
+			{
+				printf(RED "CAN NOT OPEN FILE %s\n\n" NONE, filename);
+			}
+			continue;
+		}
+
+		if ((len = sock_send(clientfd, buff, len)) < 0)
 			break;
 	}
 
@@ -838,6 +1012,7 @@ static void usage(const char *prog)
 	printf("    -p <port>     server port\n");
 	printf("    -s            server mode\n");
 	printf("    -c            client mode\n");
+	printf("    -d            directory to save files\n");
 	printf("    -h            help messages\n");
 }
 
@@ -847,8 +1022,9 @@ int main(int argc, char *argv[])
 	int mode = MODE_SERVER;
 	char *ip = "127.0.0.1";
 	int port = 6666;
+	char *dir = "./";
 
-	while ((opt = getopt(argc, argv, "i:p:sch")) != -1)
+	while ((opt = getopt(argc, argv, "i:p:scd:h")) != -1)
 	{
 		switch(opt)
 		{
@@ -864,6 +1040,9 @@ int main(int argc, char *argv[])
 			case 'c':
 				mode = MODE_CLIENT;
 				break;
+			case 'd':
+				dir = optarg;
+				break;
 			case 'h':
 				usage(argv[0]);
 				return 1;
@@ -876,7 +1055,7 @@ int main(int argc, char *argv[])
 	}
 	else if (mode == MODE_CLIENT)
 	{
-		return start_client(ip, port);
+		return start_client(ip, port, dir);
 	}
 	else
 	{
