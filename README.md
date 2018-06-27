@@ -107,6 +107,6 @@ $ ./chatroom -c [-i IP] [-p PORT]
 | :private [id\|name] [msg] | Send private message |
 | :p [id\|name] [msg]       |                      |
 | [msg]                     | Send public message  |
-| :file [id|name] [file]    | Send private file    |
-| :f [id|name] [file]       |                      |
+| :file [id\|name] [file]   | Send private file    |
+| :f [id\|name] [file]      |                      |
 

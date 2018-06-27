@@ -709,7 +709,7 @@ static void show_msg_file(int id, char *name, char *msg, int msg_len, conn c)
 			sock_send(c->fd, buff, BUFF_SIZE);
 			// Show file saved
 			show_time();
-			printf(L_BLUE "File <%s> has been saved at <%s>\n" NONE, filename, c->dir);
+			printf(L_BLUE "File <%s> has been saved at <%s>\n\n" NONE, filename, c->dir);
 		}
 		if (filename)
 		{
