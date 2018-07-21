@@ -2,6 +2,7 @@
 #include "hashmap.h"
 #include <stdbool.h>
 #include <sys/epoll.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <time.h>
 
@@ -18,11 +19,13 @@
 /*         ||         */
 /*         \/         */
 
+
 typedef struct
 {
 	int fd;
 	char addr[32];
 	char name[32];
+	int port;
 } client_t, *client;
 
 static inline size_t int_hash(int key, size_t capacity)
@@ -94,6 +97,7 @@ static void cmd_join(server s, int fd, struct sockaddr_in addr, char *buff)
 		(addr.sin_addr.s_addr & 0xFF0000)>>16,
 		(addr.sin_addr.s_addr & 0xFF000000)>>24);
 	sprintf(c->name, "%d", fd);
+	c->port = addr.sin_port;
 	sprintf(buff, "<SERVER> JOIN [USER %d %s]\n", fd, c->name);
 	send_others(s, buff, fd);
 	sprintf(buff, "<SERVER> CONNECT [USER %d %s]\n", fd, c->name);
@@ -141,6 +145,8 @@ static void cmd_info(server s, int fd, char *buff)
 	sprintf(tmp, "[addr] %s\n", c->addr);
 	strcat(buff, tmp);
 	sprintf(tmp, "[name] %s\n", c->name);
+	strcat(buff, tmp);
+	sprintf(tmp, "[port] %d\n", c->port);
 	strcat(buff, tmp);
 	send_msg(fd, buff);
 }
@@ -286,23 +292,37 @@ static void cmd_public(server s, int fd, char *buff, char *msg)
 
 /* Client sends private file
    Send message to specific client:
-       <F>[id name] ...
+       <F>[id name] role peer_host peer_port local_port file [size]
  */
 static void cmd_file(server s, int fd, char *buff, char *msg, char *name)
 {
 	client c;
-	int cfd = -1;
-	int header_len;
+	client r;
+	int rfd = -1;
+	char *param;
+	char *file;
+	long long size;
 	hashmap_get(client, s->client_map, fd, &c);
-	if ((cfd = atoi(name)) <= 0)
+	if ((rfd = atoi(name)) <= 0)
 	{
-		hashmap_get(name, s->name_map, name, &cfd);
+		hashmap_get(name, s->name_map, name, &rfd);
 	}
-	if (hashmap_has_key(client, s->client_map, cfd) == 0 && cfd != fd)
+	if (hashmap_get(client, s->client_map, rfd, &r) == 0 && rfd != fd)
 	{
-		header_len = sprintf(buff, "<F>[%d %s] ", fd, c->name);
-		memcpy(buff + header_len, msg, BUFF_SIZE - header_len);
-		sock_send(cfd, buff, BUFF_SIZE);
+		// Parse msg: file [size]
+		file = strtok(msg, " \n");
+		param = strtok(NULL, " \n");
+		size = atoll(param);
+		// Send message to sender:
+		//     <F>[r_id r_name] sender r_host r_port s_port file size
+		sprintf(buff, "<F>[%d %s] sender %s %d %d %s %lld\n", 
+			r->fd, r->name, r->addr, r->port, c->port, file, size);
+		send_msg(fd, buff);
+		// Send message to receiver:
+		//    <F>[s_id s_name] receiver s_host s_port r_port file size
+		sprintf(buff, "<F>[%d %s] receiver %s %d %d %s %lld\n", 
+			c->fd, c->name, c->addr, c->port, r->port, file, size);
+		send_msg(rfd, buff);
 	}
 	else
 	{
@@ -512,6 +532,7 @@ typedef struct
 	char name[32];
 	char addr[32];
 	char dir[512];
+	int port;
 	volatile bool alive;
 } conn_t, *conn;
 
@@ -559,10 +580,10 @@ static void show_quit(int id, char *name)
 
 /* Clients gets info about itself
  */
-static void show_info(conn c, int id, char *name, char *addr)
+static void show_info(int id, char *name, char *addr, int port)
 {
 	show_time();
-	printf(GREEN "CURRENT INFO, [id] %d [name] %s [addr] %s\n\n" NONE, id, name, addr);
+	printf(GREEN "CURRENT INFO, [id] %d [name] %s [addr] %s [port] %d\n\n" NONE, id, name, addr, port);
 }
 
 /* Clients renames itself
@@ -656,80 +677,336 @@ static void show_msg_public(int id, char *name, char *msg)
 	printf("%s\n", msg);
 }
 
+typedef enum 
+{
+	STATE_UNKNOWN,
+	STATE_SERVER,
+	STATE_CLIENT,
+	STATE_ERROR,
+	STATE_SUCCESS
+} peer_state;
+
+typedef struct
+{
+	bool sender;
+	char *peer_host;
+	int peer_port;
+	int local_port;
+	char *dir;
+	char *file;
+	long long size;
+	long long real_size;
+	volatile peer_state state;
+	pthread_mutex_t lock;
+} peer_conn_t, *peer_conn;
+
+static int tranfer_file(int fd, peer_conn pc)
+{
+	FILE *fp;
+	char *filename;
+	char *filepath;
+	int len;
+	char buff[BUFF_SIZE];
+	int ret = -1;
+	long long size = 0;
+
+	if (pc->sender)
+	{
+		if ((fp = fopen(pc->file, "r")) != NULL)
+		{
+			while ((len = fread(buff, sizeof(char), BUFF_SIZE, fp)) > 0)
+			{
+				if ((len = sock_send(fd, buff, len)) <= 0)
+				{
+					printf("FAIL TO SEND FILE\n");
+					break;
+				}
+				size += len;
+				// printf("HAVE SENT %lld B\n", size);
+			}
+			pc->real_size = size;
+			fclose(fp);
+			close(fd);
+			ret = 0;
+		}
+		else
+		{
+			printf("CAN NOT OPEN FILE %s\n", pc->file);
+		}
+	}
+	else 
+	{
+		if ( (filename = strrchr(pc->file, '/')) != NULL)
+			filename += 1;
+		else
+			filename = pc->file;
+		filepath = malloc(sizeof(char) * (strlen(pc->dir) + 3 + strlen(filename)));
+		sprintf(filepath, "%s/%s", pc->dir, filename);
+		if ((fp = fopen(filepath, "w")) != NULL)
+		{
+			while ((len = sock_recv(fd, buff, BUFF_SIZE)) > 0)
+			{
+				if ((len = fwrite(buff, sizeof(char), len, fp)) <= 0)
+				{
+					printf("FAIL TO SAVE FILE\n");
+					break;
+				}
+				size += len;
+			}
+			pc->real_size = size;
+			close(fd);
+			fclose(fp);
+			ret = 0;
+		}
+		else
+		{
+			printf("CAN NOT OPEN FILE %s\n", filepath);
+		}
+		free(filepath);
+	}
+
+	return ret;
+}
+
+static void *peer_server(void *arg)
+{
+	peer_conn pc;
+	struct sockaddr_in addr;
+	socklen_t slen;
+	int serverfd;
+	int sessionfd;
+	int value = 1;
+	int flag;
+
+	pc = (peer_conn) arg;
+
+	if ((serverfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+	{
+		return NULL;
+	}
+	if (setsockopt(serverfd, SOL_SOCKET, SO_REUSEADDR, &value, sizeof(value)) < 0)
+	{
+		return NULL;
+	}
+
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	addr.sin_port = htons(pc->local_port);
+
+	if (bind(serverfd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+	{
+		return NULL;
+	}
+
+	if (listen(serverfd, 5) < 0)
+	{
+		return NULL;
+	}
+
+	flag = fcntl(serverfd, F_GETFL, 0);
+	fcntl(serverfd, F_SETFL, flag | O_NONBLOCK);
+
+	slen = sizeof(addr);
+	while (pc->state == STATE_UNKNOWN)
+	{
+		if ((sessionfd = accept(serverfd, (struct sockaddr *)&addr, &slen)) > 0)
+		{
+			pthread_mutex_lock(&pc->lock);
+			if (pc->state == STATE_CLIENT)
+			{
+				pthread_mutex_unlock(&pc->lock);
+				close(sessionfd);
+				break;
+			}
+			pc->state = STATE_SERVER;
+			pthread_mutex_unlock(&pc->lock);
+
+			flag = fcntl(serverfd, F_GETFL, 0);
+			fcntl(serverfd, F_SETFL, flag | ~O_NONBLOCK);
+
+			// Transfer file
+			if (tranfer_file(sessionfd, pc) == 0)
+			{
+				pc->state = STATE_SUCCESS;
+			}
+			else
+			{
+				pc->state = STATE_ERROR;
+			}
+		}
+	}
+	close(serverfd);
+
+	return NULL;
+}
+
+static void *peer_client(void *arg)
+{
+	peer_conn pc;
+	struct sockaddr_in addr;
+	int clientfd;
+	int value = 1;
+	int flag;
+
+	pc = (peer_conn) arg;
+
+	if ((clientfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+	{
+		return NULL;
+	}
+	if (setsockopt(clientfd, SOL_SOCKET, SO_REUSEADDR, &value, sizeof(value)) < 0)
+	{
+		return NULL;
+	}
+
+	addr.sin_family = AF_INET;
+	inet_pton(AF_INET, pc->peer_host, &addr.sin_addr);
+	addr.sin_port = htons(pc->peer_port);
+
+	flag = fcntl(clientfd, F_GETFL, 0);
+	fcntl(clientfd, F_SETFL, flag | O_NONBLOCK);
+
+	while (pc->state == STATE_UNKNOWN)
+	{
+		if (connect(clientfd, (struct sockaddr *)&addr, sizeof(addr)) == 0)
+		{
+			pthread_mutex_lock(&pc->lock);
+			if (pc->state == STATE_SERVER)
+			{
+				pthread_mutex_unlock(&pc->lock);
+				close(clientfd);
+				break;
+			}
+			pc->state = STATE_CLIENT;
+			pthread_mutex_unlock(&pc->lock);
+
+			flag = fcntl(clientfd, F_GETFL, 0);
+			fcntl(clientfd, F_SETFL, flag | ~O_NONBLOCK);
+
+			// Transfer file
+			if (tranfer_file(clientfd, pc) == 0)
+			{
+				pc->state = STATE_SUCCESS;
+			}
+			else
+			{
+				pc->state = STATE_ERROR;
+			}
+		}
+	}
+
+	return NULL;
+}
+
+static char *format_file_size(long long size)
+{
+	char *buff;
+	const char suffixes[5] = {'B', 'K', 'M', 'G', 'T'};
+	int values[5];
+	int i = 0;
+	long long cur = size;
+	float v;
+
+	buff = malloc(sizeof(char) * 64);
+	while (i < 4 && cur > 0)
+	{
+		values[i++] = cur % 1024;
+		cur /= 1024;
+	}
+	if (cur > 0)
+	{
+		values[i++] = cur;
+	}
+	i--;
+
+	v = values[i];
+	if (i > 0)
+		v += 1.0f * values[i - 1] / 1024;
+
+	sprintf(buff, "%.2f %c", v ,suffixes[i]);
+
+	return buff;
+}
+
 /* Client gets file messge from one user
-   msg format: type length value
-       type: [n]ame, [b]egin, [m]ore, [e]nd, o[k]
+   msg format: role peer_host peer_port local_port file [size]
+       role: s[ender], r[eceiver]
  */
 static void show_msg_file(int id, char *name, char *msg, int msg_len, conn c)
 {
-	static char *filename = NULL;
-	static FILE *fp = NULL;
-	char *filepath;
-
+	peer_conn pc;
 	char *param;
-	char *type;
-	int len;
-	char *value;
-	char buff[128];
+	pthread_t st, ct;
 
-	type = strtok(msg, " ");
-	param = strtok(NULL, " ");
-	len = atoi(param);
-	value = param + strlen(param) + 1;
-	if (!strcmp(type, "name") || !strcmp(type, "n"))
+	if ((pc = malloc(sizeof(peer_conn_t))) == NULL)
 	{
-		value[len] = 0;
-		filename = strdup(value);
-		// Show filename
 		show_time();
-		printf(BLUE "<F>[%d %s]: \n" NONE, id, name);
-		printf(L_BLUE "File <%s>\n\n" NONE, filename);
+		printf(RED "ERROR, FAIL TO ALLOCATE MEMORY\n" NONE);
+		return;
 	}
-	else if (!strcmp(type, "begin") || !strcmp(type, "b"))
+
+	// Parse message
+	param = strtok(msg, " ");
+	if (!strcmp(param, "s") || !strcmp(param, "sender"))
 	{
-		filepath = malloc(sizeof(char) * (strlen(c->dir) + 3 + strlen(filename)));
-		sprintf(filepath, "%s/%s", c->dir, filename);
-		if ((fp = fopen(filepath, "w")) != NULL)
-			fwrite(value, sizeof(char), len, fp);
-		free(filepath);
+		pc->sender = true;
 	}
-	else if (!strcmp(type, "more") || !strcmp(type, "m"))
+	else if (!strcmp(param, "r") || !strcmp(param, "receiver"))
 	{
-		if (fp)
-			fwrite(value, sizeof(char), len, fp);
-	}
-	else if (!strcmp(type, "end") || !strcmp(type, "e"))
-	{
-		if (fp)
-		{
-			// fwrite(value, sizeof(char), len, fp);
-			fclose(fp);
-			fp = NULL;
-			sprintf(buff, ":f %d o %4d %s", id, (int) strlen(filename), filename);
-			sock_send(c->fd, buff, BUFF_SIZE);
-			// Show file saved
-			show_time();
-			printf(L_BLUE "File <%s> has been saved at <%s>\n\n" NONE, filename, c->dir);
-		}
-		if (filename)
-		{
-			free(filename);
-			filename = NULL;
-		}
-	}
-	else if (!strcmp(type, "ok") || !strcmp(type, "o"))
-	{
-		value[len] = 0;
-		printf(GREEN "FILE <%s> HAS BEEN SENT\n\n", value);
+		pc->sender = false;
 	}
 	else
 	{
-		// Unknown type
-		type[strlen(type)] = ' ';
-		param[strlen(param)] = ' ';
-		printf(YELLOW "<F>[%d %s][UNKNOWN]: \n" NONE, id, name);
-		printf("%s\n", msg);
+		show_time();
+		printf(RED "ERROR, UNKNOWN FILE TRANSFER ROLE: %s\n" NONE, param);
+		return;
 	}
+	param = strtok(NULL, " ");
+	pc->peer_host = strdup(param);
+	param = strtok(NULL, " ");
+	pc->peer_port = atoi(param);
+	param = strtok(NULL, " ");
+	pc->local_port = atoi(param);
+	param = strtok(NULL, " ");
+	pc->dir = strdup(c->dir);
+	pc->file = strdup(param);
+	param = strtok(NULL, " ");
+	pc->size = atoll(param);
+	pc->state = STATE_UNKNOWN;
+	pthread_mutex_init(&pc->lock, NULL);
+
+	// Create peer connection, then transfer file
+	pthread_create(&st, NULL, peer_server, pc);
+	pthread_create(&ct, NULL, peer_client, pc);
+	pthread_join(st, NULL);
+	pthread_join(ct, NULL);
+
+	show_time();
+	printf(PURPLE "<F>[%d][%s]: \n" NONE, id, name);
+	if (pc->state == STATE_SUCCESS)
+	{
+		if (pc->sender)
+			printf(PURPLE "SUCCESS, FILE HAS BEEN SENT\n" NONE);
+		else
+			printf(PURPLE "SUCCESS, FILE HAS BEEN SAVED AT %s\n" NONE, pc->dir);
+		printf(PURPLE "FILE: %s\n" NONE, pc->file);
+		param = format_file_size(pc->real_size);
+		printf(PURPLE "SIZE: %s [%lld]\n\n" NONE, param, pc->real_size);
+		free(param);
+	}
+	else
+	{
+		if (pc->sender)
+			printf(RED "ERROR, FAIL TO SEND FILE %s\n\n" NONE, pc->file);
+		else
+			printf(RED "ERROR, FAIL TO RECEIVE FILE %s\n\n" NONE, pc->file);
+	}
+
+	free(pc->peer_host);
+	free(pc->dir);
+	free(pc->file);
+	pthread_mutex_destroy(&pc->lock);
+	free(pc);
 }
 
 /* Client gets message from unknown user
@@ -770,6 +1047,7 @@ static void *client_worker(void *arg)
 				param += 8;
 				sscanf(param, "[USER %d %s]", &id, name);
 				name[strlen(name)-1] = 0;
+				strcpy(c->name, name);
 				show_connect(c, id, name);
 			}
 			else if (!strcmp(param, "DISCONNECT"))
@@ -804,12 +1082,15 @@ static void *client_worker(void *arg)
 				sscanf(param, "%s %s", tag, addr);
 				param = strtok(NULL, "\n");
 				sscanf(param, "%s %s", tag, name);
-				show_info(c, id, name, addr);
+				param = strtok(NULL, "\n");
+				sscanf(param, "%s %d", tag, &(c->port));
+				show_info(id, name, addr, c->port);
 			}
 			else if (!strcmp(param, "RENAME"))
 			{
 				param += 7;
 				sscanf(param, "[USER %d] %s TO %s", &id, tag, name);
+				strcpy(c->name, name);
 				show_rename(id, tag, name);
 			}
 			else if (!strcmp(param, "ERROR"))
@@ -920,10 +1201,7 @@ static int start_client(char *ip, int port, char *dir)
 	char cmd[64];
 	char name[64];
 	char filepath[1024];
-	char *filename;
-	FILE *fp;
-	int header_len;
-	int buff_size;
+	struct stat stat_buff;
 
 	memset(&c, 0, sizeof(c));
 
@@ -950,44 +1228,16 @@ static int start_client(char *ip, int port, char *dir)
 		{
 			// Send file
 			sscanf(buff, "%s %s %s", cmd, name, filepath);
-			if ((fp = fopen(filepath, "r")) != NULL )
+			if (!stat(filepath, &stat_buff))
 			{
-				if ( (filename = strrchr(filepath, '/')) != NULL)
-					filename += 1;
-				else
-					filename = filepath;
-				header_len = (int) sprintf(buff, ":f %s n %4d ", name, (int) strlen(filename));
-				buff_size = BUFF_SIZE - header_len - 64;
-				// Send type name
-				len = sprintf(buff + header_len, "%s", filename);
-				if ((len = sock_send(clientfd, buff, BUFF_SIZE)) < 0)
-					break;
-				// Send type begin
-				len = fread(buff+header_len, sizeof(char), buff_size, fp);
-				sprintf(buff + header_len - 7, "b %4d", len);
-				buff[header_len - 1] = ' ';
-				if ((len = sock_send(clientfd, buff, BUFF_SIZE)) < 0)
-					break;
-				while ((len = fread(buff+header_len, sizeof(char), buff_size, fp)) > 0)
-				{
-					// Send type more
-					sprintf(buff + header_len - 7, "m %4d", len);
-					buff[header_len - 1] = ' ';
-					if ((len = sock_send(clientfd, buff, BUFF_SIZE)) < 0)
-					{
-						break;
-					}
-				}
-				// Send type end
-				sprintf(buff + header_len - 7, "e    0 \n");
-				if (len < 0 || ((len = sock_send(clientfd, buff, BUFF_SIZE)) < 0))
-					break;
+				// Check file and append size
+				len = sprintf(buff, "%s %s %s %ld\n", cmd, name, filepath, stat_buff.st_size);
 			}
 			else
 			{
-				printf(RED "CAN NOT OPEN FILE %s\n\n" NONE, filename);
+				printf(RED "CAN NOT OPEN FILE %s\n\n" NONE, filepath);
+				continue;
 			}
-			continue;
 		}
 
 		if ((len = sock_send(clientfd, buff, len)) < 0)
