@@ -40,7 +40,7 @@
 #define hashmap_has_key(name, map, key) \
 	name##_hashmap_has_key(map, key)
 #define hashmap_get(name, map, key, pvalue) \
-	name##_hashmap_get(map, key, pvalue);
+	name##_hashmap_get(map, key, pvalue)
 #define hashmap_put(name, map, key, value) \
 	name##_hashmap_put(map, key, value);
 #define hashmap_remove(name, map, key) \
