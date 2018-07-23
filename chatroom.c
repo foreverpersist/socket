@@ -700,7 +700,7 @@ typedef struct
 	pthread_mutex_t lock;
 } peer_conn_t, *peer_conn;
 
-static int tranfer_file(int fd, peer_conn pc)
+static int transfer_file(int fd, peer_conn pc)
 {
 	FILE *fp;
 	char *filename;
@@ -722,8 +722,9 @@ static int tranfer_file(int fd, peer_conn pc)
 					break;
 				}
 				size += len;
-				// printf("HAVE SENT %lld B\n", size);
+				printf("\rSENDING %3.2f%% [%lld B]", 100.f * size / pc->size, pc->size);
 			}
+			printf("\n");
 			pc->real_size = size;
 			fclose(fp);
 			close(fd);
@@ -752,7 +753,9 @@ static int tranfer_file(int fd, peer_conn pc)
 					break;
 				}
 				size += len;
+				printf("\rRECEIVING %3.2f%% [%lld B]", 100.f * size / pc->size, pc->size);
 			}
+			printf("\n");
 			pc->real_size = size;
 			close(fd);
 			fclose(fp);
@@ -834,7 +837,7 @@ static void *peer_server(void *arg)
 
 			//printf("IN SERVER MODE\n");
 			// Transfer file
-			if (tranfer_file(sessionfd, pc) == 0)
+			if (transfer_file(sessionfd, pc) == 0)
 			{
 				pc->state = STATE_SUCCESS;
 			}
@@ -891,7 +894,7 @@ static void *peer_client(void *arg)
 
 			//printf("IN CLIENT MODE\n");
 			// Transfer file
-			if (tranfer_file(clientfd, pc) == 0)
+			if (transfer_file(clientfd, pc) == 0)
 			{
 				pc->state = STATE_SUCCESS;
 			}
