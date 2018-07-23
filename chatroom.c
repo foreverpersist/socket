@@ -770,13 +770,16 @@ static int tranfer_file(int fd, peer_conn pc)
 
 static void *peer_server(void *arg)
 {
+	//printf("ENTER SERVER THREAD\n");
 	peer_conn pc;
 	struct sockaddr_in addr;
 	socklen_t slen;
 	int serverfd;
 	int sessionfd;
 	int value = 1;
-	int flag;
+	int times = 0;
+	struct timeval tv;
+	fd_set readfds;
 
 	pc = (peer_conn) arg;
 
@@ -798,17 +801,25 @@ static void *peer_server(void *arg)
 		return NULL;
 	}
 
-	if (listen(serverfd, 5) < 0)
+	if (listen(serverfd, 1) < 0)
 	{
 		return NULL;
 	}
 
-	flag = fcntl(serverfd, F_GETFL, 0);
-	fcntl(serverfd, F_SETFL, flag | O_NONBLOCK);
+	FD_ZERO(&readfds);
+	FD_SET(serverfd, &readfds);
+	tv.tv_sec = 1;
+	tv.tv_usec = 0;
 
-	slen = sizeof(addr);
-	while (pc->state == STATE_UNKNOWN)
+	while (pc->state == STATE_UNKNOWN && times < 6)
 	{
+		//printf("LISTENING ...\n");
+		if (select(serverfd + 1, &readfds, NULL, NULL, &tv) <= 0)
+		{
+			times++;
+			continue;
+		}
+		slen = sizeof(addr);
 		if ((sessionfd = accept(serverfd, (struct sockaddr *)&addr, &slen)) > 0)
 		{
 			pthread_mutex_lock(&pc->lock);
@@ -821,9 +832,7 @@ static void *peer_server(void *arg)
 			pc->state = STATE_SERVER;
 			pthread_mutex_unlock(&pc->lock);
 
-			flag = fcntl(serverfd, F_GETFL, 0);
-			fcntl(serverfd, F_SETFL, flag | ~O_NONBLOCK);
-
+			//printf("IN SERVER MODE\n");
 			// Transfer file
 			if (tranfer_file(sessionfd, pc) == 0)
 			{
@@ -837,16 +846,18 @@ static void *peer_server(void *arg)
 	}
 	close(serverfd);
 
+	//printf("LEAVE SERVER THREAD\n");
 	return NULL;
 }
 
 static void *peer_client(void *arg)
 {
+	//printf("ENTER CLIENT THREAD\n");
 	peer_conn pc;
 	struct sockaddr_in addr;
 	int clientfd;
 	int value = 1;
-	int flag;
+	int times = 0;
 
 	pc = (peer_conn) arg;
 
@@ -863,11 +874,9 @@ static void *peer_client(void *arg)
 	inet_pton(AF_INET, pc->peer_host, &addr.sin_addr);
 	addr.sin_port = htons(pc->peer_port);
 
-	flag = fcntl(clientfd, F_GETFL, 0);
-	fcntl(clientfd, F_SETFL, flag | O_NONBLOCK);
-
-	while (pc->state == STATE_UNKNOWN)
+	while (pc->state == STATE_UNKNOWN && times < 10)
 	{
+		//printf("CONNECTING ...\n");
 		if (connect(clientfd, (struct sockaddr *)&addr, sizeof(addr)) == 0)
 		{
 			pthread_mutex_lock(&pc->lock);
@@ -880,9 +889,7 @@ static void *peer_client(void *arg)
 			pc->state = STATE_CLIENT;
 			pthread_mutex_unlock(&pc->lock);
 
-			flag = fcntl(clientfd, F_GETFL, 0);
-			fcntl(clientfd, F_SETFL, flag | ~O_NONBLOCK);
-
+			//printf("IN CLIENT MODE\n");
 			// Transfer file
 			if (tranfer_file(clientfd, pc) == 0)
 			{
@@ -893,8 +900,10 @@ static void *peer_client(void *arg)
 				pc->state = STATE_ERROR;
 			}
 		}
+		times++;
 	}
 
+	//printf("LEAVE CLIENT THREAD\n");
 	return NULL;
 }
 
@@ -962,7 +971,10 @@ static void show_msg_file(int id, char *name, char *msg, int msg_len, conn c)
 		return;
 	}
 	param = strtok(NULL, " ");
-	pc->peer_host = strdup(param);
+	if (!strcmp(param, "127.0.0.1") || !strcmp(param, "localhost"))
+		pc->peer_host = strdup(c->addr);
+	else
+		pc->peer_host = strdup(param);
 	param = strtok(NULL, " ");
 	pc->peer_port = atoi(param);
 	param = strtok(NULL, " ");
@@ -1214,6 +1226,8 @@ static int start_client(char *ip, int port, char *dir)
 	c.fd = clientfd;
 	c.alive = true;
 	strcpy(c.dir, dir);
+	strcpy(c.addr, ip);
+	c.port = port;
 	/* Receive messages from server */
 	pthread_create(&tid, NULL, client_worker, (void *) &c);
 
